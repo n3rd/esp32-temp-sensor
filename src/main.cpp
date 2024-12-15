@@ -1,21 +1,25 @@
 #include <Arduino.h>
 #include <esp_adc_cal.h>
-#include "Adafruit_MQTT.h"
-#include "Adafruit_MQTT_Client.h"
+#include <Adafruit_MQTT.h>
+#include <Adafruit_MQTT_Client.h>
 #include <WiFi.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
-#include "time.h"
+#include <time.h>
+#include <Wire.h>
+#include <Adafruit_Sensor.h>
+#include <Adafruit_BME280.h>
 #include "secrets.h"
+#include "config.h"
 
-/************************* Adafruit.io Setup *********************************/
+/************************* BME280 Setup *********************************/
 
-#define AIO_SERVER      "io.adafruit.com"
-#define AIO_SERVERPORT  1883                   // use 8883 for SSL
+#define SEALEVELPRESSURE_HPA (1013.25)
 
-const char* ntpServer = "pool.ntp.org";
-const long  gmtOffset_sec = 3600;
-const int   daylightOffset_sec = 3600;
+Adafruit_BME280 bme(BME_CS); // hardware SPI
+//Adafruit_BME280 bme(BME_CS, BME_MOSI, BME_MISO, BME_SCK); // software SPI
+
+unsigned long delayTime;
 
 /************ Global State (you don't need to change this!) ******************/
 
@@ -32,6 +36,9 @@ Adafruit_MQTT_Client mqtt(&client, AIO_SERVER, AIO_SERVERPORT, AIO_USERNAME, AIO
 // Setup a feed called 'photocell' for publishing.
 // Notice MQTT paths for AIO follow the form: <username>/feeds/<feedname>
 Adafruit_MQTT_Publish temperatureFeed = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/temperature");
+Adafruit_MQTT_Publish bmeTemperatureFeed = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/bme280-temperature");
+Adafruit_MQTT_Publish bmePressureFeed = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/bme280-pressure");
+Adafruit_MQTT_Publish bmeHumidityFeed = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/bme280-humidity");
 
 // Setup a feed called 'onoff' for subscribing to changes.
 //Adafruit_MQTT_Subscribe onoffbutton = Adafruit_MQTT_Subscribe(&mqtt, AIO_USERNAME "/feeds/onoff");
@@ -42,12 +49,9 @@ Adafruit_MQTT_Publish temperatureFeed = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAM
 // for some reason (only affects ESP8266, likely an arduino-builder bug).
 void MQTT_connect();
 uint32_t readADC_Cal(int ADC_Raw);
-void publish(uint32_t temp);
+void publish(float temp);
 void show(uint32_t temp);
-
-#define LM_PIN    36
-#define SleftEEN_WIDTH 128 // OLED display width, in pixels
-#define SleftEEN_HEIGHT 32 // OLED display height, in pixels
+void printValues();
 
 // Declaration for an SSD1306 display connected to I2C (SDA, SCL pins)
 // The pins for I2C are defined by the Wire-library. 
@@ -103,6 +107,15 @@ void setup() {
   // Init and get the time
   configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
 
+  bool status;
+  // default settings
+  // (you can also pass in a Wire library object like &Wire2)
+  status = bme.begin(0x76);  
+  if (!status) {
+    Serial.println("Could not find a valid BME280 sensor, check wiring!");
+    while (1);
+  }
+
   delay(2000);
 }
 
@@ -111,7 +124,9 @@ void loop()
   raw = analogRead(LM_PIN);  
   voltage = readADC_Cal(raw);
   temperature = voltage / 10;
-  Serial.printf("Temperature: %2.1f °C\r\n", temperature);
+  Serial.printf("Temperature: %2.1f °C (LM35)\r\n", temperature);
+
+  printValues(); // BME280
 
   if(temperature != prev_temperature) {
     show(temperature);
@@ -157,7 +172,7 @@ uint32_t readADC_Cal(int ADC_Raw)
   return(esp_adc_cal_raw_to_voltage(ADC_Raw, &adc_chars));
 }
 
-void publish(uint32_t temp) 
+void publish(float temp) 
 {
   // Ensure the connection to the MQTT server is alive (this will make the first
   // connection and automatically reconnect when disconnected).  See the MQTT_connect
@@ -168,7 +183,25 @@ void publish(uint32_t temp)
   Serial.print(F("\nSending temperature val "));
   Serial.printf("%2.1f", temperature);
   Serial.print("...");
-  if (! temperatureFeed.publish(temp)) {
+  if (!temperatureFeed.publish(temp, 1)) {
+    Serial.println(F("Failed"));
+  } else {
+    Serial.println(F("OK!"));
+  }
+
+  if (!bmeTemperatureFeed.publish(bme.readTemperature(), 1)) {
+    Serial.println(F("Failed"));
+  } else {
+    Serial.println(F("OK!"));
+  }
+
+  if (!bmePressureFeed.publish(bme.readPressure() / 100.0F, 2)) {
+    Serial.println(F("Failed"));
+  } else {
+    Serial.println(F("OK!"));
+  }
+
+  if (!bmeHumidityFeed.publish(bme.readHumidity(), 0)) {
     Serial.println(F("Failed"));
   } else {
     Serial.println(F("OK!"));
@@ -197,4 +230,29 @@ void show(uint32_t temp)
       Serial.println("Failed to obtain time");
     }
     display.display();
+}
+
+void printValues() {
+  Serial.print("Temperature = ");
+  Serial.print(bme.readTemperature());
+  Serial.println(" *C");
+  
+  // Convert temperature to Fahrenheit
+  /*Serial.print("Temperature = ");
+  Serial.print(1.8 * bme.readTemperature() + 32);
+  Serial.println(" *F");*/
+  
+  Serial.print("Pressure = ");
+  Serial.print(bme.readPressure() / 100.0F);
+  Serial.println(" hPa");
+
+  Serial.print("Approx. Altitude = ");
+  Serial.print(bme.readAltitude(SEALEVELPRESSURE_HPA));
+  Serial.println(" m");
+
+  Serial.print("Humidity = ");
+  Serial.print(bme.readHumidity());
+  Serial.println(" %");
+
+  Serial.println();
 }
